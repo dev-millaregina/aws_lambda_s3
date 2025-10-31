@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 + Lambda Image Processor Service
+
+Resources:
+  InputImagesBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: LambdaInvokePermission
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-input-images"
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ImageProcessorFn.Arn
+
+  ProcessedImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-processed-images"
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-LambdaExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3AccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${AWS::StackName}-input-images/*"
+                  - !Sub "arn:aws:s3:::${AWS::StackName}-processed-images/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  ImageProcessorFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-imageProcessorFn"
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          PROCESSED_BUCKET: !Ref ProcessedImagesBucket
+      Code:
+        ZipFile: |
+          import boto3, os, urllib.parse
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              for record in event.get('Records', []):
+                  bucket = record['s3']['bucket']['name']
+                  key = urllib.parse.unquote_plus(record['s3']['object']['key'])
+                  
+                  dest_bucket = os.environ['PROCESSED_BUCKET']
+                  dest_key = f"processed_{os.path.basename(key)}"
+
+                  s3.copy_object(
+                      Bucket=dest_bucket,
+                      Key=dest_key,
+                      CopySource={'Bucket': bucket, 'Key': key}
+                  )
+              return {"status": "success"}
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ImageProcessorFn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::${AWS::StackName}-input-images"
+
+Outputs:
+  InputBucketName:
+    Value: !Ref InputImagesBucket
+  ProcessedBucketName:
+    Value: !Ref ProcessedImagesBucket
+  LambdaFunctionName:
+    Value: !Ref ImageProcessorFn
